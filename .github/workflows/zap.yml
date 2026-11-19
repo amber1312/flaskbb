@@ -1,0 +1,53 @@
+name: ZAP
+on: workflow_dispatch
+
+jobs:
+  zap:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner info
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          nproc
+          free -m | head -2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install locked dependencies (setup, not timed)
+        run: |
+          python -m pip install --upgrade pip uv
+          uv sync --frozen --no-dev
+
+      - name: Install FlaskBB and start app
+        run: |
+          .venv/bin/flaskbb --config flaskbb.configs.default.DefaultConfig install --force -u admin -e admin@example.com -p 'Test1234!'
+          nohup .venv/bin/flaskbb --config flaskbb.configs.default.DefaultConfig run --host 0.0.0.0 --port 5000 > app.log 2>&1 &
+
+      - name: Wait for app
+        run: |
+          for i in $(seq 1 60); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/ || true)
+            echo "http=$CODE"
+            if [ "$CODE" = "200" ] || [ "$CODE" = "302" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "app did not start"; tail -n 50 app.log; exit 1
+
+      - name: ZAP baseline scan
+        run: |
+          mkdir zap-out && chmod 777 zap-out
+          docker run --rm --network host -v "$PWD/zap-out:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238 \
+            zap-baseline.py -t http://localhost:5000 -J zap-report.json -I
+
+      - name: Verify scan output
+        run: test -s zap-out/zap-report.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zap-result
+          path: zap-out/zap-report.json
